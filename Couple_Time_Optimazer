@@ -1,0 +1,113 @@
+// ===========================================
+//  Lister les calendriers accessibles
+// ===========================================
+function listerCalendriers() {
+  const calendriers = CalendarApp.getAllCalendars();
+  calendriers.forEach(cal => Logger.log("📌 Calendrier dispo : " + cal.getName()));
+}
+
+// ===========================================
+//  Créer les blocs "Couple Time"
+//  - Parcourt "D/O" ou "SBY"
+//  - Couvre toute la période multi-jours
+//  - Exclut le jour suivant si fin = 00:00
+//  - Supprime chevauchements
+//  - Couleur mauve (proche du rose)
+// ===========================================
+function creerCoupleTime() {
+  const calendrierNom = "NomCalendrierDeLaConjointe"; // Vérifie avec listerCalendriers()
+  const calendriers = CalendarApp.getCalendarsByName(calendrierNom);
+  if (calendriers.length === 0) {
+    Logger.log("❌ Erreur : Le calendrier '" + calendrierNom + "' n'existe pas !");
+    return;
+  }
+
+  const calendrierCopine = calendriers[0];
+  const calendrierMoi = CalendarApp.getDefaultCalendar();
+
+  const aujourdHui = new Date();
+  const dans45Jours = new Date();
+  dans45Jours.setDate(aujourdHui.getDate() + 45);
+
+  const evenementsCopine = calendrierCopine.getEvents(aujourdHui, dans45Jours);
+
+  evenementsCopine.forEach(evSrc => {
+    const titre = evSrc.getTitle().toUpperCase();
+    if (titre.includes("D/O") || titre.includes("SBY")) {
+      const start = new Date(evSrc.getStartTime());
+      const end = new Date(evSrc.getEndTime());
+
+      // Cursor jour à minuit du jour de début
+      let jour = new Date(start);
+      jour.setHours(0, 0, 0, 0);
+
+      // Calcule le DERNIER jour à inclure
+      // Si la fin est exactement à 00:00, on exclut ce jour (fin exclusive)
+      let lastIncluded = new Date(end);
+      const endsAtMidnight =
+        lastIncluded.getHours() === 0 &&
+        lastIncluded.getMinutes() === 0 &&
+        lastIncluded.getSeconds() === 0 &&
+        lastIncluded.getMilliseconds() === 0;
+
+      if (endsAtMidnight) {
+        // recule d'un jour car la fin est exclusive
+        lastIncluded.setDate(lastIncluded.getDate() - 1);
+      }
+      // Etend à la fin de la journée incluse
+      lastIncluded.setHours(23, 59, 59, 999);
+
+      Logger.log("📅 Période retenue : " + titre + " du " + jour + " au " + lastIncluded);
+
+      while (jour <= lastIncluded) {
+        // Blocs sur ce jour
+        const matinDebut = new Date(jour); matinDebut.setHours(9, 0, 0, 0);
+        const matinFin   = new Date(jour); matinFin.setHours(12, 0, 0, 0);
+
+        const apmDebut   = new Date(jour); apmDebut.setHours(14, 0, 0, 0);
+        const apmFin     = new Date(jour); apmFin.setHours(23, 0, 0, 0);
+
+        const couleur = CalendarApp.EventColor.MAUVE; // proche du rose
+
+        [[matinDebut, matinFin],[apmDebut, apmFin]].forEach(([debut, fin]) => {
+          // Supprime tout événement qui se chevauche sur le créneau
+          const existants = calendrierMoi.getEvents(debut, fin);
+          existants.forEach(e => e.deleteEvent());
+          if (existants.length > 0) {
+            Logger.log("🗑️ Supprimés évènements du " + debut + " au " + fin);
+          }
+
+          // Crée l'événement Couple Time puis applique la couleur
+          const ev = calendrierMoi.createEvent("Couple Time", debut, fin, {
+            description: "Bloqué pour passer du temps avec Ana 💕"
+          });
+          ev.setColor(couleur);
+
+          Logger.log("✅ Ajouté : Couple Time le " + debut);
+        });
+
+        // Jour suivant (toujours à minuit)
+        jour.setDate(jour.getDate() + 1);
+        jour.setHours(0, 0, 0, 0);
+      }
+    }
+  });
+}
+
+// ===========================================
+//  Déclencheur automatique quotidien à 07h00
+// ===========================================
+function creerDeclencheurQuotidien() {
+  const triggers = ScriptApp.getProjectTriggers();
+  triggers.forEach(t => {
+    if (t.getHandlerFunction() === "creerCoupleTime") ScriptApp.deleteTrigger(t);
+  });
+
+  ScriptApp.newTrigger("creerCoupleTime")
+    .timeBased()
+    .everyDays(1)
+    .atHour(4)
+    .create();
+
+  Logger.log("⏰ Déclencheur quotidien créé pour 04:00");
+}
