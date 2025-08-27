@@ -1,0 +1,130 @@
+/***************************************
+ Notion Kanban -> Google Calendar Sync
+ Google Apps Script (Code.gs)
+ Remplace les constantes ci-dessous avant exécution.
+***************************************/
+
+const NOTION_SECRET = 'TonSecret'; // ton Internal Integration Secret
+const DATABASE_ID = 'TaDBiD';     // ex: 259d6f8445cf8063a778de528a0dd2d9
+const GOOGLE_CALENDAR_ID = '@Mail_agenda';          // ou l'ID d'un calendrier spécifique
+const NOTION_VERSION = '2022-06-28';           // header Notion version
+
+// Nom exact de la propriété Notion qui stocke l'ID GCal (doit exister dans la DB)
+const NOTION_GCAL_ID_PROP = 'gcal_event_id';
+
+function syncNotionToGCal_noDuplicateTitleDate() {
+  const items = queryNotionDatabaseAll();
+  if (!items || items.length === 0) return;
+
+  const sample = items[0].properties || {};
+  const titleKey = detectTitleProperty(sample);
+  const dateKey = detectDateProperty(sample);
+  if (!dateKey) return;
+
+  items.forEach(item => {
+    try {
+      const props = item.properties || {};
+      const pageId = item.id;
+      const pageUrl = 'https://www.notion.so/' + pageId.replace(/-/g,'');
+      const title = extractTitle(props, titleKey) || '(no title)';
+      const dateObj = extractDate(props, dateKey);
+      if (!dateObj) return;
+
+      // 1️⃣ Supprimer seulement les événements avec le même titre ET la même date
+      deleteExistingEventsByTitleAndDate(title, dateObj);
+
+      // 2️⃣ Créer le nouvel événement (en gris)
+      const newId = createCalendarEvent(title, dateObj, pageUrl);
+
+      // 3️⃣ (optionnel) Mettre à jour Notion avec l'ID de l'événement
+      if (newId) patchNotionPageWithGCalId(pageId, newId);
+
+      Logger.log('Événement créé/MAJ pour : ' + title);
+
+    } catch (e) {
+      Logger.log('Erreur item ' + (item.id||'') + ' -> ' + e.toString());
+    }
+  });
+
+  Logger.log('Sync terminée.');
+}
+
+/* ---------- Supprimer par titre + date ---------- */
+function deleteExistingEventsByTitleAndDate(title, dateObj) {
+  const cal = CalendarApp.getCalendarById(GOOGLE_CALENDAR_ID);
+
+  let searchStart, searchEnd;
+  if (dateObj.isAllDay) {
+    searchStart = new Date(dateObj.startDate);
+    searchEnd = new Date(dateObj.endDate);
+  } else {
+    searchStart = new Date(dateObj.startDateTime.getTime() - 1000 * 60 * 60);
+    searchEnd = new Date(dateObj.endDateTime.getTime() + 1000 * 60 * 60);
+  }
+
+  const events = cal.getEvents(searchStart, searchEnd, { search: title });
+
+  events.forEach(ev => {
+    const evStart = ev.isAllDayEvent() ? ev.getAllDayStartDate() : ev.getStartTime();
+    const targetStart = dateObj.isAllDay ? dateObj.startDate : dateObj.startDateTime;
+
+    if (
+      ev.getTitle() === title &&
+      Math.abs(evStart - targetStart) < 60000 // tolérance 1 min
+    ) {
+      ev.deleteEvent();
+      Logger.log('Ancien événement supprimé : ' + title);
+    }
+  });
+}
+
+/* ---------- Fonctions Notion + Google Calendar ---------- */
+function queryNotionDatabaseAll() {
+  const url = 'https://api.notion.com/v1/databases/' + DATABASE_ID + '/query';
+  const payload = { page_size: 100 };
+  const options = {
+    method: 'post',
+    contentType: 'application/json',
+    headers: { 'Authorization':'Bearer '+NOTION_SECRET, 'Notion-Version':NOTION_VERSION },
+    payload: JSON.stringify(payload),
+    muteHttpExceptions:true
+  };
+  const res = UrlFetchApp.fetch(url, options);
+  if (res.getResponseCode() !== 200) return [];
+  const body = JSON.parse(res.getContentText());
+  return body.results || [];
+}
+
+function detectTitleProperty(props) { for(const k in props) if(props[k] && props[k].type==='title') return k; return null; }
+function detectDateProperty(props) { for(const k in props) if(props[k] && props[k].type==='date') return k; return null; }
+function extractTitle(props, key) { if(!key||!props[key]) return null; return (props[key].title||[]).map(x=>x.plain_text).join(''); }
+function extractDate(props,key){
+  if(!key||!props[key]||!props[key].date) return null;
+  const d=props[key].date,start=d.start,end=d.end||null,isAllDay=(start.length===10 && !start.includes('T'));
+  if(isAllDay){ const s=new Date(start+'T00:00:00'); let e=end?new Date(end+'T00:00:00'):new Date(s.getTime()+24*60*60*1000); return {isAllDay:true,startDate:s,endDate:e}; }
+  else{ const s=new Date(start); const e=end?new Date(end):new Date(s.getTime()+60*60*1000); return {isAllDay:false,startDateTime:s,endDateTime:e}; }
+}
+
+/* ---------- Création d'événement avec couleur ---------- */
+function createCalendarEvent(title,dateObj,pageUrl){
+  const cal=CalendarApp.getCalendarById(GOOGLE_CALENDAR_ID);
+  let event;
+  if(dateObj.isAllDay){
+    event=cal.createAllDayEvent(title,dateObj.startDate,dateObj.endDate,{description:pageUrl});
+  } else {
+    event=cal.createEvent(title,dateObj.startDateTime,dateObj.endDateTime,{description:pageUrl});
+  }
+
+  // 🎨 couleur GRIS
+  event.setColor(CalendarApp.EventColor.GRAY);
+
+  return event.getId();
+}
+
+function patchNotionPageWithGCalId(pageId,eventId){
+  const url='https://api.notion.com/v1/pages/'+pageId;
+  const body={properties:{}};
+  body.properties[NOTION_GCAL_ID_PROP]={rich_text:[{text:{content:eventId}}]};
+  const options={method:'patch',contentType:'application/json',headers:{'Authorization':'Bearer '+NOTION_SECRET,'Notion-Version':NOTION_VERSION},payload:JSON.stringify(body),muteHttpExceptions:true};
+  UrlFetchApp.fetch(url,options);
+}
